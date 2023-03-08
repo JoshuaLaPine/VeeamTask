@@ -103,6 +103,7 @@ namespace VeeamTask
                     byte[] hashVal = hasher.ComputeHash(fileStream);
                     fileStream.Close();
 
+                    //File is new, create an entry in the dictionary, copy it, log it.
                     if (!fileHashDict.ContainsKey(tempFileInfo.FullName))
                     {
                         fileHashDict.Add(tempFileInfo.FullName, hashVal);
@@ -115,6 +116,7 @@ namespace VeeamTask
                     }
                     else
                     {
+                        //File hash has changed, copy it, log it. 
                         if (!fileHashDict[tempFileInfo.FullName].SequenceEqual(hashVal))
                         {
                             fileHashDict[tempFileInfo.FullName] = hashVal;
@@ -125,7 +127,7 @@ namespace VeeamTask
                             logger.ChangeCopy(tempFileInfo.FullName, fullReplicaPath);
 
                         }
-                        //file hash hasn't changed. Need to check that it hasn't been deleted manually and recopy it if so 
+                        //File hash hasn't changed. Need to check that it hasn't been deleted manually and recopy it if so 
                         else
                         {
                             string directorySuffix = directoryVar.FullName.Remove(0, sourceInfo.FullName.Length);
@@ -168,7 +170,7 @@ namespace VeeamTask
                         logger.SourceCreation(tempDirInfo.FullName);
                         logger.InitialCopy(tempDirInfo.FullName, fullReplicaPath);
                     }
-                    //check to see if a directory has been removed manually
+                    //Check to see if a directory has been removed manually, recreate it if so
                     else
                     {
                         if (!Directory.Exists(fullReplicaPath))
@@ -263,6 +265,8 @@ namespace VeeamTask
 
         private void RemoveNonSourceFiles(DirectoryInfo directoryVar)
         {
+
+            //Removes any files from replica that don't exist in source
             FileInfo[] files = directoryVar.GetFiles();
             foreach(FileInfo file in files)
             {
@@ -285,6 +289,7 @@ namespace VeeamTask
                 }
             }
 
+            //Removes any folders from replica that don't exist in source
             DirectoryInfo[] directories = directoryVar.GetDirectories();
             foreach(DirectoryInfo directory in directories)
             {
