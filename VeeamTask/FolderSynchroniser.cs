@@ -1,7 +1,10 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Security.Cryptography;
 using System.Timers;
+using System.Linq;
+
 
 namespace VeeamTask
 {
@@ -11,27 +14,51 @@ namespace VeeamTask
         private DirectoryInfo replicaInfo;
         private int syncPeriodMinutes;
 
-        private static Timer syncTimer;
+        private Dictionary<string, byte[]> fileHashDict;
+        private HashSet<string> directorySet;
+        private SHA256 hasher;
 
-        public FolderSynchroniser(string sourcePath, string replicaPath, string syncPeriodMinutes)
+        private Timer syncTimer;
+        private SychronisationLogger logger;
+
+        public FolderSynchroniser(string sourcePath, string replicaPath, string syncPeriodMinutes, string logPath)
         {
             if (!Directory.Exists(sourcePath))
             {
-                Console.WriteLine("Source folder directory not found");
+                Console.WriteLine("Source directory not found");
                 Environment.Exit(3);
             }
 
             if (!Directory.Exists(replicaPath))
             {
-                Console.WriteLine("Replica folder directory not found");
+                Console.WriteLine("Replica directory not found");
                 Environment.Exit(3);
+            }
+
+            if (!Directory.Exists(logPath))
+            {
+                Console.WriteLine("log directory not found");
+                Environment.Exit(3);
+            }
+
+            if (int.TryParse(syncPeriodMinutes, out int parsedInt))
+            {
+                this.syncPeriodMinutes = parsedInt;
+            }
+            else
+            {
+                Console.WriteLine("Sync interval value is invalid");
+                Environment.Exit(1);
             }
 
             sourceInfo = new DirectoryInfo(sourcePath);
             replicaInfo = new DirectoryInfo(replicaPath);
-            this.syncPeriodMinutes = int.Parse(syncPeriodMinutes);
+            logger = new SychronisationLogger(logPath);
 
-            //Directory.Delete(Path.Combine(sourceInfo.FullName, "fold"), true);
+
+            fileHashDict = new Dictionary<string, byte[]>();
+            directorySet = new HashSet<string>();
+            hasher = SHA256.Create();
 
             SetupTimer();
 
@@ -39,7 +66,7 @@ namespace VeeamTask
 
         private void SetupTimer()
         {
-            syncTimer = new Timer(syncPeriodMinutes * 60 * 100); //Multiple of 6 seconds rather than minute
+            syncTimer = new Timer(syncPeriodMinutes * 60 * 1000); //Converts minutes to milliseconds
             syncTimer.Elapsed += Sync;
             syncTimer.AutoReset = true;
             syncTimer.Enabled = true;
@@ -58,17 +85,232 @@ namespace VeeamTask
 
         private void Sync(Object source, ElapsedEventArgs e)
         {
-            foreach (FileInfo tempFileInfo in sourceInfo.GetFiles())
-            {
-                tempFileInfo.CopyTo(Path.Combine(replicaInfo.FullName, tempFileInfo.Name), true);
-                //Console.WriteLine(Path.Combine(replicaInfo.FullName,tempFileInfo.Name));
-            }
-       
+            SyncFiles(sourceInfo);
+            DeletionPass();
+            RemoveNonSourceFiles(replicaInfo);
+            
         }
 
-        private void SyncFiles()
+        private void SyncFiles(DirectoryInfo directoryVar)
         {
-            
+            foreach (FileInfo tempFileInfo in directoryVar.GetFiles())
+            {
+                
+                try
+                {
+                    FileStream fileStream = tempFileInfo.Open(FileMode.Open);
+                    fileStream.Position = 0;
+                    byte[] hashVal = hasher.ComputeHash(fileStream);
+                    fileStream.Close();
+
+                    if (!fileHashDict.ContainsKey(tempFileInfo.FullName))
+                    {
+                        fileHashDict.Add(tempFileInfo.FullName, hashVal);
+                        string directorySuffix = directoryVar.FullName.Remove(0, sourceInfo.FullName.Length);
+                        string fullReplicaPath = Path.Combine(replicaInfo.FullName, directorySuffix, tempFileInfo.Name);
+                        tempFileInfo.CopyTo(fullReplicaPath, true);
+
+                        logger.SourceCreation(tempFileInfo.FullName);
+                        logger.InitialCopy(tempFileInfo.FullName, fullReplicaPath);
+                    }
+                    else
+                    {
+                        if (!fileHashDict[tempFileInfo.FullName].SequenceEqual(hashVal))
+                        {
+                            fileHashDict[tempFileInfo.FullName] = hashVal;
+                            string directorySuffix = directoryVar.FullName.Remove(0, sourceInfo.FullName.Length);
+                            string fullReplicaPath = Path.Combine(replicaInfo.FullName, directorySuffix, tempFileInfo.Name);
+                            tempFileInfo.CopyTo(fullReplicaPath, true);
+
+                            logger.ChangeCopy(tempFileInfo.FullName, fullReplicaPath);
+
+                        }
+                        //file hash hasn't changed. Need to check that it hasn't been deleted manually and recopy it if so 
+                        else
+                        {
+                            string directorySuffix = directoryVar.FullName.Remove(0, sourceInfo.FullName.Length);
+                            string fullReplicaPath = Path.Combine(replicaInfo.FullName, directorySuffix, tempFileInfo.Name);
+                            if (!File.Exists(fullReplicaPath))
+                            {
+
+                                tempFileInfo.CopyTo(fullReplicaPath, true);
+                                logger.ManualRemovalCopy(tempFileInfo.FullName, fullReplicaPath);
+                            }
+                        }
+                    }
+
+
+                }
+                catch (IOException e)
+                {
+                    Console.WriteLine($"I/O Exception: {e.Message}");
+                }
+                catch (UnauthorizedAccessException e)
+                {
+                    Console.WriteLine($"Access Exception: {e.Message}");
+                }
+            }
+
+            //Check if each directory already existed, if not, add it to the set, copy it to replica, log it.
+            foreach (DirectoryInfo tempDirInfo in directoryVar.GetDirectories())
+            {
+                try
+                {
+                    string directorySuffix = tempDirInfo.FullName.Remove(0, sourceInfo.FullName.Length);
+                    string fullReplicaPath = Path.Combine(replicaInfo.FullName, directorySuffix);
+
+                    if (!directorySet.Contains(tempDirInfo.FullName))
+                    {
+                        directorySet.Add(tempDirInfo.FullName);
+ 
+                        Directory.CreateDirectory(fullReplicaPath);
+
+                        logger.SourceCreation(tempDirInfo.FullName);
+                        logger.InitialCopy(tempDirInfo.FullName, fullReplicaPath);
+                    }
+                    //check to see if a directory has been removed manually
+                    else
+                    {
+                        if (!Directory.Exists(fullReplicaPath))
+                        {
+                            Directory.CreateDirectory(fullReplicaPath);
+                            logger.ManualRemovalCopy(tempDirInfo.FullName, fullReplicaPath);
+                        }
+                    }
+                }
+                catch (IOException e)
+                {
+                    Console.WriteLine($"I/O Exception: {e.Message}");
+                }
+                catch (UnauthorizedAccessException e)
+                {
+                    Console.WriteLine($"Access Exception: {e.Message}");
+                }
+            }
+
+            //Recursive call to ensure all subdirectories and contained files are processed
+            foreach (DirectoryInfo tempDirInfo in directoryVar.GetDirectories())
+            {
+                SyncFiles(tempDirInfo);
+            }
+        }
+
+        private void DeletionPass()
+        {
+
+            //Iterates over files and deletes any keys and copies if the source file no longer exists
+            List<string> keysForDeletion = new List<string>();
+            foreach(string key in fileHashDict.Keys)
+            {
+                if (!File.Exists(key))
+                {
+                    try
+                    {
+                        string fileSuffix = key.Remove(0, sourceInfo.FullName.Length);
+                        string fullReplicaPath = Path.Combine(replicaInfo.FullName, fileSuffix);
+                        File.Delete(fullReplicaPath);
+                        keysForDeletion.Add(key);
+                        logger.SourceRemoval(key, fullReplicaPath);
+                    }
+                    catch (IOException e)
+                    {
+                        Console.WriteLine($"I/O Exception: {e.Message}");
+                    }
+                    catch (UnauthorizedAccessException e)
+                    {
+                        Console.WriteLine($"Access Exception: {e.Message}");
+                    }
+                }
+            }
+
+            foreach(string key in keysForDeletion)
+            {
+                fileHashDict.Remove(key);
+            }
+
+            //Iterates over directories and deletes any elements and copies if the source folder no longer exists
+            List<string> elemsForDeletion = new List<string>();
+            foreach(string elem in directorySet)
+            {
+                if (!Directory.Exists(elem))
+                {
+                    try
+                    {
+                        string directorySuffix = elem.Remove(0, sourceInfo.FullName.Length);
+                        string fullReplicaPath = Path.Combine(replicaInfo.FullName, directorySuffix);
+                        if (Directory.Exists(fullReplicaPath)){
+                            Directory.Delete(fullReplicaPath, true);
+                        }
+                        logger.SourceRemoval(elem, fullReplicaPath);
+                        elemsForDeletion.Add(elem);
+                    }
+                    catch (IOException e)
+                    {
+                        Console.WriteLine($"I/O Exception: {e.Message}");
+                    }
+                    catch (UnauthorizedAccessException e)
+                    {
+                        Console.WriteLine($"Access Exception: {e.Message}");
+                    }
+                }
+            }
+
+            foreach(string elem in elemsForDeletion)
+            {
+                directorySet.Remove(elem);
+            }
+        }
+
+        private void RemoveNonSourceFiles(DirectoryInfo directoryVar)
+        {
+            FileInfo[] files = directoryVar.GetFiles();
+            foreach(FileInfo file in files)
+            {
+                try
+                {
+                    string directorySuffix = file.FullName.Remove(0, replicaInfo.FullName.Length);
+                    if (!fileHashDict.ContainsKey(Path.Combine(sourceInfo.FullName, directorySuffix)))
+                    {
+                        File.Delete(file.FullName);
+                        logger.ReplicaRemoval(file.FullName);
+                    }
+                }
+                catch (IOException e)
+                {
+                    Console.WriteLine($"I/O Exception: {e.Message}");
+                }
+                catch (UnauthorizedAccessException e)
+                {
+                    Console.WriteLine($"Access Exception: {e.Message}");
+                }
+            }
+
+            DirectoryInfo[] directories = directoryVar.GetDirectories();
+            foreach(DirectoryInfo directory in directories)
+            {
+                try
+                {
+                    string directorySuffix = directory.FullName.Remove(0, replicaInfo.FullName.Length);
+                    if (!directorySet.Contains(Path.Combine(sourceInfo.FullName, directorySuffix)))
+                    {
+                        Directory.Delete(directory.FullName, true);
+                        logger.ReplicaRemoval(directory.FullName);
+                    }
+                }
+                catch (IOException e)
+                {
+                    Console.WriteLine($"I/O Exception: {e.Message}");
+                }
+                catch (UnauthorizedAccessException e)
+                {
+                    Console.WriteLine($"Access Exception: {e.Message}");
+                }
+            }
+
+            foreach(DirectoryInfo directory in directoryVar.GetDirectories())
+            {
+                RemoveNonSourceFiles(directory);
+            }
         }
     }
 }
