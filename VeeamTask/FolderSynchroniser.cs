@@ -60,13 +60,17 @@ namespace VeeamTask
             directorySet = new HashSet<string>();
             hasher = SHA256.Create();
 
+            //Initial Sync
+            SyncFiles(sourceInfo);
+            RemoveNonSourceFiles(replicaInfo);
+
             SetupTimer();
 
         }
 
         private void SetupTimer()
         {
-            syncTimer = new Timer(syncPeriodMinutes * 60 * 1000); //Converts minutes to milliseconds
+            syncTimer = new Timer(syncPeriodMinutes * 60 * 200); //Converts minutes to milliseconds
             syncTimer.Elapsed += Sync;
             syncTimer.AutoReset = true;
             syncTimer.Enabled = true;
